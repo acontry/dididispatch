@@ -16,6 +16,18 @@ from zipfile import ZipFile
 ORDER_FILE = 'order_01-30.zip'
 GPS_FILES = ['gps_01-10.zip', 'gps_11-20.zip', 'gps_21-30.zip']
 
+ORDER_FILE_COLUMNS = [
+    'order_id',
+    'start_time',
+    'stop_time',
+    'pickup_lat',
+    'pickup_lng',
+    'dropoff_lat',
+    'dropoff_lng',
+    'reward']
+
+CANCEL_FILE_COLUMNS = ['order_id'] + [f'cancel_prob_{r}m' for r in range(200,2001,200)]
+
 
 @dataclass
 class DriverSchedule:
@@ -27,7 +39,10 @@ class DriverSchedule:
 
 
 def process_trajectory_file(f, output_file_dir):
-    """Build driver schedules from trajectory file and save to disk."""
+    """Build driver schedules from trajectory file and save to disk.
+
+    This is done in a streaming fashion to avoid loading entire trajectory files into memory at once.
+    """
     ds = f.name.split('_')[1]
 
     drivers = dict()
@@ -60,7 +75,29 @@ def process_trajectory_file(f, output_file_dir):
     df = pd.DataFrame([asdict(d) for d in drivers.values()])
     df = df.sort_values(by='start_time', ignore_index=True)
 
-    df.to_csv(output_file_full_path / f'{ds}.csv', index=False)
+    df.to_parquet(output_file_full_path / f'{ds}.parquet', index=False)
+
+
+def process_order_files(interim_data_path, processed_data_path):
+    """Process all order files, combining orders with cancel probabilities."""
+    output_file_path = (processed_data_path / 'orders')
+    output_file_path.mkdir(exist_ok=True)
+
+    order_file_iterator = (interim_data_path / 'total_ride_request').iterdir()
+
+    for order_file in order_file_iterator:
+        df_order = pd.read_csv(order_file, names=ORDER_FILE_COLUMNS)
+        cancel_file = interim_data_path / 'total_order_cancellation_probability' / f'{order_file.name}_cancel_prob'
+        df_cancel = pd.read_csv(cancel_file, names=CANCEL_FILE_COLUMNS)
+
+        df_cancel['cancel_prob'] = df_cancel[df_cancel.columns[1:]].values.tolist()
+        df_cancel = df_cancel[['order_id', 'cancel_prob']]
+
+        df = df_order.merge(df_cancel, on='order_id')
+        df.sort_values(by='start_time', ignore_index=True)
+
+        df.to_parquet(output_file_path / f'{order_file.name.split("_")[1]}.parquet', index=False)
+        print(f'{order_file.name} written')
 
 
 def main():
@@ -77,6 +114,9 @@ def main():
     if not (interim_data_path / 'hexagon_grid_table.csv').exists():
         with ZipFile(raw_data_path / ORDER_FILE) as z:
             z.extractall(interim_data_path)
+
+    # Process order files
+    process_order_files(interim_data_path, processed_data_path)
 
     # Process trajectories
     for gps_file in GPS_FILES:
