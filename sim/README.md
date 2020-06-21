@@ -97,8 +97,9 @@ are provided for each order.
 
 #### Requests
 Build simulated requests using ride request data. Treat `ride start time` as 
- `ride request time` as an approximation. Batch orders over 2 second dispatch 
- batch window, joining with cancellation probability data.
+ `ride request time` (this is an approximation, but probably close enough). 
+ Batch orders over 2 second dispatch batch window, joining with cancellation 
+ probability data.
  
 #### Drivers
 Build driver go online time/location and go offline time from driver trajectory 
