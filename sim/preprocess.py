@@ -26,7 +26,7 @@ ORDER_FILE_COLUMNS = [
     'dropoff_lng',
     'reward']
 
-CANCEL_FILE_COLUMNS = ['order_id'] + [f'cancel_prob_{r}m' for r in range(200,2001,200)]
+CANCEL_FILE_COLUMNS = ['order_id'] + [f'cancel_prob_{r}m' for r in range(200, 2001, 200)]
 
 
 @dataclass
