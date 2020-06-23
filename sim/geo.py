@@ -23,7 +23,9 @@ def local_projection_distance(lat1, lng1, lat2, lng2):
 def great_circle_distance(lat1, lng1, lat2, lng2):
     """Returns great circle distance in meters."""
     lng1, lat1, lng2, lat2 = map(radians, [lng1, lat1, lng2, lat2])
-    return 6371.0088 * (acos(sin(lat1) * sin(lat2) + cos(lat1) * cos(lat2) * cos(lng1 - lng2)))
+    x = sin(lat1) * sin(lat2) + cos(lat1) * cos(lat2) * cos(lng1 - lng2)
+    x = max(min(x, 1.0), -1.0)
+    return 6371008.8 * (acos(x))
 
 
 def intermediate_point(lat1, lng1, lat2, lng2, frac):
