@@ -1,6 +1,6 @@
-from math import radians, sin, cos, acos
-import numpy as np
+from math import radians, sin, cos, acos, sqrt
 
+import numpy as np
 
 ###########################################################
 # Calculate approximate projection based on region latitude
@@ -13,6 +13,11 @@ LAT_RAD = np.deg2rad(LAT_DEG)
 # https://en.wikipedia.org/wiki/Geographic_coordinate_system#Latitude_and_longitude
 METERS_PER_DEG_LAT = 111132.92 - 559.82 * cos(2 * LAT_RAD) + 1.175 * cos(4 * LAT_RAD) - 0.0023 * cos(6*LAT_RAD)
 METERS_PER_DEG_LNG = 111412.84 * cos(LAT_RAD) - 93.5 * cos(3*LAT_RAD) + 0.118 * cos(5*LAT_RAD)
+
+
+def local_projection_distance(lat1, lng1, lat2, lng2):
+    """Returns distance between two points in meters using a local projection."""
+    return sqrt((METERS_PER_DEG_LAT * (lat1 - lat2)) ** 2 + (METERS_PER_DEG_LNG * (lng1 - lng2)) ** 2)
 
 
 def great_circle_distance(lat1, lng1, lat2, lng2):

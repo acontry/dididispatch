@@ -1,15 +1,12 @@
-import csv
 import collections
-import math
-import os
+import csv
 import time
 from pathlib import Path
 from typing import Dict, List, Tuple
 
 from scipy.spatial import KDTree
 
-
-LNG_FACTOR = 0.685  # Assume latitude ~30.6
+from sim.geo import great_circle_distance, local_projection_distance, METERS_PER_DEG_LAT, METERS_PER_DEG_LNG
 
 
 class Grid:
@@ -27,11 +24,12 @@ class Grid:
                 # Use centroid for simplicity
                 lng = sum([float(row[i]) for i in range(1, 13, 2)]) / 6
                 lat = sum([float(row[i]) for i in range(2, 13, 2)]) / 6
-                self.grids[grid_id] = (lng, lat)
+                self.grids[grid_id] = (lat, lng)
 
         assert len(self.grids) == 8518
         self.grid_ids = list(self.grids.keys())  # type: List[str]
-        self.kdtree = KDTree(list(self.grids.values()))
+        self.kdtree = KDTree([(METERS_PER_DEG_LAT*lat, METERS_PER_DEG_LNG*lng)
+                              for lat, lng in self.grids.values()])
 
         transitions_path = Path(__file__).parent.parent / 'data' / 'interim' / 'idle_transition_probability'
         with transitions_path.open('r') as csvfile:
@@ -52,33 +50,29 @@ class Grid:
         assert len(self.transitions) == 24
 
     def lookup_grid_id(self, lat: float, lng: float) -> str:
-        _, i = self.kdtree.query([lng, lat])
+        """Get grid id from coordinates."""
+        _, i = self.kdtree.query([METERS_PER_DEG_LAT*lat, METERS_PER_DEG_LNG*lng])
         return self.grid_ids[i]
 
     def lookup_coord(self, grid_id: str) -> Tuple[float, float]:
-        """Return coordinates of grid."""
-        lng, lat = self.grids[grid_id]
-        return lat, lng
+        """Return lat/lng coordinates of grid."""
+        return self.grids[grid_id]
 
     def distance(self, x: str, y: str, fast=True) -> float:
-        """ Return haversine distance in meters """
+        """Return distance between two grids in meters.
+
+        When fast is true, a local projection distance is used. Otherwise, great circle distance is used.
+        """
         if x not in self.grids or y not in self.grids:
             return 1e12
 
-        lng_x, lat_x = self.grids[x]
-        lng_y, lat_y = self.grids[y]
+        lat_x, lng_x = self.grids[x]
+        lat_y, lng_y = self.grids[y]
 
-        # Manhattan
         if fast:
-            lat_delta = abs(lat_x - lat_y)
-            lng_delta = LNG_FACTOR * abs(lng_x - lng_y)
-            return 111320 * math.pow(math.pow(lat_delta, 2) + math.pow(lng_delta, 2), 0.5)
-
-        # Haversine
-        lng_x, lng_y, lat_x, lat_y = map(math.radians, [lng_x, lng_y, lat_x, lat_y])
-        lng_delta, lat_delta = abs(lng_x - lng_y), abs(lat_x - lat_y)
-        a = math.pow(math.sin(lat_delta / 2), 2) + math.cos(lat_x) * math.cos(lat_y) * math.pow(math.sin(lng_delta / 2), 2)
-        return 6371000 * 2 * math.asin(math.sqrt(a))
+            return local_projection_distance(lat_x, lng_x, lat_y, lng_y)
+        else:
+            return great_circle_distance(lat_x, lng_x, lat_y, lng_y)
 
     def idle_transitions(self, timestamp: int, start_grid_id: str) -> Dict[str, float]:
         hour = time.gmtime(timestamp).tm_hour
