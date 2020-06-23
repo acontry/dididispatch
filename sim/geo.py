@@ -1,4 +1,4 @@
-from math import radians, sin, cos, acos, sqrt
+from math import radians, sin, cos, acos, sqrt, atan2
 
 import numpy as np
 
@@ -24,3 +24,19 @@ def great_circle_distance(lat1, lng1, lat2, lng2):
     """Returns great circle distance in meters."""
     lng1, lat1, lng2, lat2 = map(radians, [lng1, lat1, lng2, lat2])
     return 6371.0088 * (acos(sin(lat1) * sin(lat2) + cos(lat1) * cos(lat2) * cos(lng1 - lng2)))
+
+
+def intermediate_point(lat1, lng1, lat2, lng2, frac):
+    """Return lat,lng of intermediate point a fraction of the way between points 1 and 2."""
+    lng1, lat1, lng2, lat2 = map(radians, [lng1, lat1, lng2, lat2])
+    d = acos(sin(lat1) * sin(lat2) + cos(lat1) * cos(lat2) * cos(lng1 - lng2))  # Angular distance
+    a = sin((1-frac)*d) / sin(d)
+    b = sin(frac*d) / sin(d)
+
+    x = a * cos(lat1) * cos(lng1) + b * cos(lat2) * cos(lng2)
+    y = a * cos(lat1) * sin(lng1) + b * cos(lat2) * sin(lng2)
+    z = a * sin(lat1) + b * sin(lat2)
+    lat = atan2(z, sqrt(x ** 2 + y ** 2))
+    lng = atan2(y, x)
+
+    return lat, lng

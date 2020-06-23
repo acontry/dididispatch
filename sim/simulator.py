@@ -2,6 +2,7 @@ import heapq
 from collections import deque, OrderedDict
 from dataclasses import dataclass
 from datetime import datetime
+from enum import Enum, auto
 from pathlib import Path
 from typing import List
 
@@ -10,16 +11,23 @@ import pandas as pd
 from scipy.spatial import KDTree as KDTree
 
 from model.agent import Agent
-from sim.geo import METERS_PER_DEG_LAT, METERS_PER_DEG_LNG, great_circle_distance
+from sim.geo import METERS_PER_DEG_LAT, METERS_PER_DEG_LNG, great_circle_distance, intermediate_point
+from sim.grid import Grid
 
 STEP_SEC = 2
 MAX_PICKUP_RADIUS_METERS = 2000
-DRIVER_SPEED_METERS_PER_SEC = 3.0
+DRIVER_SPEED_SEC_PER_METER = 1.0 / 3
 
 CANCEL_PROB_DISTANCES = list(range(200, 2001, 200))
 
 
 PROCESSED_DATA_PATH = Path(__file__).parent.parent / 'data' / 'processed'
+
+
+class DriverState(Enum):
+    FREE = auto()
+    IDLE_MOVING = auto()
+    IN_RIDE = auto()
 
 
 @dataclass
@@ -34,10 +42,27 @@ class Driver:
     start_time: int
     end_time: int  # Shift end time
     available_time: int = 0  # Next time that driver is available (not in a ride)
+    destination_lat: float = 0  # Destination used for idle movement
+    destination_lng: float = 0
+    idle_duration: int = 0
+    state: DriverState = DriverState.FREE
     score: float = 0
 
     def __lt__(self, other):
         return self.end_time < other.end_time
+
+    def assign_ride(self, lat: float, lng: float, available_time: int, score: float):
+        """Assign a ride to driver.
+
+        Store location as ride destination. We don't need to track the driver's location until
+        they arrive.
+        """
+        self.lat = lat
+        self.lng = lng
+        self.available_time = available_time
+        self.idle_duration = 0
+        self.state = DriverState.IN_RIDE
+        self.score += score
 
 
 @dataclass
@@ -66,7 +91,7 @@ class Order:
             'order_finish_timestamp': self.end_time,
             'day_of_week': day_of_week,
             'reward_units': self.reward,
-            'pick_up_eta': distance / DRIVER_SPEED_METERS_PER_SEC
+            'pick_up_eta': distance * DRIVER_SPEED_SEC_PER_METER
         }
 
 
@@ -75,6 +100,9 @@ class Simulator:
         self.agent = agent
         self.ds = ds
         self.num_repositionable_drivers = num_repositionable_drivers
+
+        # Spatial info
+        self.grid = Grid()
 
         #########
         # Drivers
@@ -167,12 +195,13 @@ class Simulator:
 
         self.process_new_matches(matched)
         self.process_unfulfilled_orders()
-
+        self.process_idle_drivers()
 
     def complete_routes(self):
         while self.drivers_busy and self.drivers_busy[0][0] <= self.time:
             _, driver_id = heapq.heappop(self.drivers_busy)
             driver = self.drivers_online[driver_id]
+            driver.state = DriverState.FREE
             self.drivers_available[driver.driver_id] = driver
 
     def remove_offline_drivers(self):
@@ -232,16 +261,14 @@ class Simulator:
                 self.score += order.reward
 
                 # Update driver
-                driver.lat = order.dropoff_lat
-                driver.lng = order.dropoff_lng
                 # Ride duration calculation:
                 # - P2 is calculated by great circle distance and 3 m/s moving speed
                 # - P3 comes directly from order duration
-                driver.available_time = (
+                available_time = (
                         self.time +
-                        int(pickup_distance / DRIVER_SPEED_METERS_PER_SEC) +
+                        int(pickup_distance * DRIVER_SPEED_SEC_PER_METER) +
                         (order.end_time - order.start_time))
-                driver.score += order.reward
+                driver.assign_ride(order.dropoff_lat, order.dropoff_lng, available_time, order.reward)
 
                 del self.drivers_available[driver_id]
                 del self.orders_active[order_id]
@@ -254,7 +281,38 @@ class Simulator:
         self.orders_active.clear()
 
     def process_idle_drivers(self):
-        pass
+        """Idle driver movement."""
+        for driver in self.drivers_available.values():
+            driver.idle_duration += STEP_SEC
+            # Driver who just idly reached their idle destination are now (temporarily) free
+            if driver.state == DriverState.IDLE_MOVING and driver.available_time <= self.time:
+                driver.lat = driver.destination_lat
+                driver.lng = driver.destination_lng
+                driver.state = DriverState.FREE
+
+            # Assign new idle destinations to free driver
+            if driver.state == DriverState.FREE:
+                # Choose idle transition
+                transitions = self.grid.idle_transitions(self.time, self.grid.lookup_grid_id(driver.lat, driver.lng))
+                grid_id = np.random.choice(list(transitions.keys()), p=list(transitions.values()))
+                lat, lng = self.grid.lookup_coord(grid_id)
+                # Update driver
+                driver.destination_lat = lat
+                driver.destination_lng = lng
+
+                dist = great_circle_distance(driver.lat, driver.lng, driver.destination_lat, driver.destination_lng)
+                driver.available_time = self.time + int(DRIVER_SPEED_SEC_PER_METER * dist)
+                driver.state = DriverState.IDLE_MOVING
+
+            # Advance driver towards their idle destinations
+            if driver.state == DriverState.IDLE_MOVING:
+                dist = great_circle_distance(driver.lat, driver.lng, driver.destination_lat, driver.destination_lng)
+                frac = min(STEP_SEC / (DRIVER_SPEED_SEC_PER_METER * dist), 1.0)
+                lat, lng = intermediate_point(driver.lat, driver.lng, driver.destination_lat, driver.destination_lng, frac)
+                driver.lat = lat
+                driver.lng = lng
+            else:
+                raise ValueError(f'Idle driver encountered in state {driver.state}')
 
 
 
