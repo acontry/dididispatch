@@ -110,11 +110,13 @@ trajectory timestamp as go offline time.
 
 1. Advance one batch window (2 sec)
     
-    1. Add drivers that went online in this batch. Maintain a set number of 
+    1. For any routes that completed, mark drivers as available.
+    
+    1. Remove any drivers that went offline in this batch.
+    
+    2. Add drivers that went online in this batch. Maintain a set number of 
     repositionable drivers by making new drivers eligible until the requirement 
     is met.
-    
-    2. Remove any drivers that went offline in this batch.
     
     3. Add orders that were made in this batch.
     
