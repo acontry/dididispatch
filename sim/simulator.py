@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum, auto
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 import numpy as np
 import pandas as pd
@@ -96,17 +96,29 @@ class Order:
 
 
 class Simulator:
-    def __init__(self, agent: Agent, ds: str, num_repositionable_drivers: int):
+    def __init__(self,
+                 agent: Agent,
+                 ds: str,
+                 num_repositionable_drivers: int,
+                 driver_warmup_time_sec: int = 60*10,
+                 test: bool = False
+                 ):
         self.agent = agent
         self.ds = ds
         self.num_repositionable_drivers = num_repositionable_drivers
+        self.test = test
+        self.order_limit = None
+        self.driver_limit = None
+        if self.test:
+            self.order_limit = 100
+        self.driver_warmup_time_sec = driver_warmup_time_sec
 
         # Spatial info
         self.grid = Grid()
 
         #########
         # Drivers
-        self.drivers_queued: deque = self.init_drivers(ds)  # Before go online. Natural order: start_time
+        self.drivers_queued: deque = self.init_drivers(ds, self.driver_limit)  # Before go online. Natural order: start_time
         self.drivers_online = dict()  # All online drivers, keyed by driver_id.
         self.drivers_done = []  # Offline drivers.
 
@@ -119,16 +131,18 @@ class Simulator:
 
         ########
         # Orders
-        self.orders: deque = self.init_orders(ds)
+        self.orders: deque = self.init_orders(ds, self.order_limit)
         self.orders_active = OrderedDict()
 
         ##################
         # Simulation state
         self.day_of_week = datetime.strptime(self.ds, '%Y%m%d').weekday()  # Monday = 0, Sunday = 6
-        self.time = min(self.drivers_queued[0].start_time, self.orders[0].start_time)
+        print(f'Driver time {self.drivers_queued[0].start_time} | Order time {self.orders[0].start_time}')
+        self.sim_start_time = max(self.drivers_queued[0].start_time, self.orders[0].start_time)
+        self.time = self.sim_start_time - self.driver_warmup_time_sec
         self.steps = 0
 
-        self.num_completed = 0
+        self.num_fulfilled = 0
         self.num_cancelled = 0
         self.num_unfulfilled = 0
         self.score = 0
@@ -136,9 +150,11 @@ class Simulator:
         self.score_unfulfilled = 0
 
     @staticmethod
-    def init_drivers(ds):
+    def init_drivers(ds: str, driver_limit: Optional[int] = None):
         print('Initializing drivers')
         df = pd.read_parquet(PROCESSED_DATA_PATH / 'drivers' / f'{ds}.parquet')
+        if driver_limit:
+            df = df.head(driver_limit)
         drivers = deque()
         for _, row in df.iterrows():
             driver = Driver(row.driver_id, row.start_lat, row.start_lng, row.start_time, row.end_time)
@@ -147,9 +163,11 @@ class Simulator:
         return drivers
 
     @staticmethod
-    def init_orders(ds):
+    def init_orders(ds: str, order_limit: Optional[int] = None):
         print('Initializing orders')
         df = pd.read_parquet(PROCESSED_DATA_PATH / 'orders' / f'{ds}.parquet')
+        if order_limit:
+            df = df.head(order_limit)
         orders = deque()
         for _, row in df.iterrows():
             order = Order(
@@ -167,16 +185,30 @@ class Simulator:
         return orders
 
     def run(self):
+        while self.time < self.sim_start_time:
+            self.warmup_step()
         while self.orders:
             self.step()
+
+        total_orders = self.num_fulfilled + self.num_cancelled + self.num_unfulfilled
+        print(f'Score: {self.score:.4f}')
+        print(f'Completed orders: {self.num_fulfilled / total_orders:.2f} | '
+              f'Cancelled orders: {self.num_cancelled / total_orders:.2f} | '
+              f'Unfulfilled orders: {self.num_unfulfilled / total_orders:.2f}')
 
     def step(self):
         self.time += STEP_SEC
         self.steps += 1
 
         if (self.steps % 100) == 0:
-            print(f'Time: {self.time} | Drivers online: {len(self.drivers_online)} | '
-                  f'Drivers available: {len(self.drivers_available)} | Drivers busy: {len(self.drivers_busy)}')
+            print(f'Time: {self.time} | '
+                  f'Drivers online: {len(self.drivers_online)} | '
+                  f'Drivers available: {len(self.drivers_available)} | '
+                  f'Drivers busy: {len(self.drivers_busy)} | '
+                  f'Orders fulfilled: {self.num_fulfilled} | '
+                  f'Orders unfulfilled: {self.num_unfulfilled} | '
+                  f'Orders cancelled: {self.num_cancelled} | '
+                  f'Score: {self.score}')
 
         # Complete routes, moving finished drivers back to available.
         self.complete_routes()
@@ -195,7 +227,24 @@ class Simulator:
 
         self.process_new_matches(matched)
         self.process_unfulfilled_orders()
-        self.process_idle_drivers()
+        self.move_idle_drivers()
+
+    def warmup_step(self):
+        """Warmup steps occur before orders happen and only simulate driver online/offline/idle movement."""
+        self.time += STEP_SEC
+        self.steps += 1
+
+        if (self.steps % 100) == 0:
+            print(f'DRIVER WARMUP | Time: {self.time} | '
+                  f'Drivers online: {len(self.drivers_online)} | '
+                  f'Drivers available: {len(self.drivers_available)} |')
+
+        # Remove drivers that went offline
+        self.remove_offline_drivers()
+        # Add new drivers that went online
+        self.add_online_drivers()
+
+        self.move_idle_drivers()
 
     def complete_routes(self):
         while self.drivers_busy and self.drivers_busy[0][0] <= self.time:
@@ -227,17 +276,20 @@ class Simulator:
 
     def build_candidates(self):
         drivers = [(METERS_PER_DEG_LAT * d.lat, METERS_PER_DEG_LNG * d.lng) for d in self.drivers_available.values()]
+        driver_ids = [d.driver_id for d in self.drivers_available.values()]
         orders = [(METERS_PER_DEG_LAT * order.pickup_lat, METERS_PER_DEG_LNG * order.pickup_lng)
                   for order in self.orders_active.values()]
-        order_tree = KDTree(orders)
-        driver_tree = KDTree(drivers)
+        if len(drivers) == 0 or len(orders) == 0:
+            return []
+        order_tree = KDTree(np.array(orders))
+        driver_tree = KDTree(np.array(drivers))
 
         all_order_matches = order_tree.query_ball_tree(driver_tree, r=MAX_PICKUP_RADIUS_METERS)
 
         candidates = []
         for order_matches, order in zip(all_order_matches, self.orders_active.values()):
             for driver_idx in order_matches:
-                driver = self.drivers_available[driver_idx]
+                driver = self.drivers_available[driver_ids[driver_idx]]
                 candidates.append(order.create_match(driver, self.day_of_week))
         return candidates
 
@@ -257,7 +309,7 @@ class Simulator:
                 self.num_cancelled += 1
                 self.score_cancelled += order.reward
             else:  # Not cancelled
-                self.num_completed += 1
+                self.num_fulfilled += 1
                 self.score += order.reward
 
                 # Update driver
@@ -280,7 +332,7 @@ class Simulator:
         self.score_unfulfilled += np.sum([order.reward for order in self.orders_active.values()])
         self.orders_active.clear()
 
-    def process_idle_drivers(self):
+    def move_idle_drivers(self):
         """Idle driver movement."""
         for driver in self.drivers_available.values():
             driver.idle_duration += STEP_SEC
@@ -307,8 +359,11 @@ class Simulator:
             # Advance driver towards their idle destinations
             if driver.state == DriverState.IDLE_MOVING:
                 dist = great_circle_distance(driver.lat, driver.lng, driver.destination_lat, driver.destination_lng)
+                if dist == 0:
+                    continue
                 frac = min(STEP_SEC / (DRIVER_SPEED_SEC_PER_METER * dist), 1.0)
-                lat, lng = intermediate_point(driver.lat, driver.lng, driver.destination_lat, driver.destination_lng, frac)
+                lat, lng = intermediate_point(
+                    driver.lat, driver.lng, driver.destination_lat, driver.destination_lng, frac)
                 driver.lat = lat
                 driver.lng = lng
             else:
@@ -320,5 +375,5 @@ class Simulator:
 
 
 if __name__ == '__main__':
-    sim = Simulator(Agent(), '20161101', 5)
+    sim = Simulator(Agent(), '20161102', 5, test=True)
     sim.run()
