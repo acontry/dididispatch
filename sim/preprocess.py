@@ -20,10 +20,10 @@ ORDER_FILE_COLUMNS = [
     'order_id',
     'start_time',
     'stop_time',
-    'pickup_lat',
     'pickup_lng',
-    'dropoff_lat',
+    'pickup_lat',
     'dropoff_lng',
+    'dropoff_lat',
     'reward']
 
 CANCEL_FILE_COLUMNS = ['order_id'] + [f'cancel_prob_{r}m' for r in range(200, 2001, 200)]
