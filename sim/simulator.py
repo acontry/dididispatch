@@ -116,27 +116,29 @@ class Simulator:
 
         #########
         # Drivers
-        self.drivers_queued: deque = self.init_drivers(ds, self.driver_limit)  # Pre-online. Natural order: start_time
+        self.driver_idx = 0
+        self.drivers = self.init_drivers(ds, self.driver_limit)  # Pre-online. Natural order: start_time
         self.drivers_online = dict()  # All online drivers, keyed by driver_id.
         self.drivers_done = []  # Offline drivers.
 
         # These are secondary data structures to enable fast lookup for driver updates.
         #
         # Online but not in ride. Keyed by driver_id
-        self.drivers_available = OrderedDict()
+        self.drivers_available = dict()
         # Online and in ride. Natural order: available_time. Min-heap of tuples of (available_time, driver_id)
         self.drivers_busy = []
 
         ########
         # Orders
-        self.orders: deque = self.init_orders(ds, self.order_limit)
-        self.orders_active = OrderedDict()
+        self.order_idx = 0
+        self.orders = self.init_orders(ds, self.order_limit)
+        self.orders_active = dict()
 
         ##################
         # Simulation state
         self.day_of_week = datetime.strptime(self.ds, '%Y%m%d').weekday()  # Monday = 0, Sunday = 6
-        print(f'Driver time {self.drivers_queued[0].start_time} | Order time {self.orders[0].start_time}')
-        self.sim_start_time = max(self.drivers_queued[0].start_time, self.orders[0].start_time)
+        print(f'Driver time {self.drivers[0].start_time} | Order time {self.orders[0].start_time}')
+        self.sim_start_time = max(self.drivers[0].start_time, self.orders[0].start_time)
         self.time = self.sim_start_time - self.driver_warmup_time_sec
         self.steps = 0
 
@@ -148,7 +150,7 @@ class Simulator:
         self.score_unfulfilled = 0
 
     @staticmethod
-    def init_drivers(ds: str, driver_limit: Optional[int] = None):
+    def init_drivers(ds: str, driver_limit: Optional[int] = None) -> List[Driver]:
         print('Initializing drivers')
         df = pd.read_parquet(PROCESSED_DATA_PATH / 'drivers' / f'{ds}.parquet')
         if driver_limit:
@@ -158,12 +160,11 @@ class Simulator:
             driver = Driver(row.driver_id, row.start_lat, row.start_lng, row.start_time, row.end_time)
             drivers.append(driver)
         drivers = sorted(drivers, key=lambda d: d.start_time)
-        drivers = deque(drivers)
         print(f'{len(drivers)} drivers initialized')
         return drivers
 
     @staticmethod
-    def init_orders(ds: str, order_limit: Optional[int] = None):
+    def init_orders(ds: str, order_limit: Optional[int] = None) -> List[Order]:
         print('Initializing orders')
         df = pd.read_parquet(PROCESSED_DATA_PATH / 'orders' / f'{ds}.parquet')
         df = df.sort_values(by='start_time', ignore_index=True)
@@ -183,14 +184,13 @@ class Simulator:
                 row.cancel_prob)
             orders.append(order)
         orders = sorted(orders, key=lambda x: x.start_time)
-        orders = deque(orders)
         print(f'{len(orders)} orders initialized')
         return orders
 
     def run(self):
         while self.time < self.sim_start_time:
             self.warmup_step()
-        while self.orders:
+        while self.order_idx < len(self.orders):
             self.step()
 
         total_orders = self.num_fulfilled + self.num_cancelled + self.num_unfulfilled
@@ -267,14 +267,16 @@ class Simulator:
             del self.drivers_available[driver_id]
 
     def add_online_drivers(self):
-        while self.drivers_queued and self.drivers_queued[0].start_time <= self.time:
-            driver = self.drivers_queued.popleft()
+        while self.driver_idx < len(self.drivers) and self.drivers[self.driver_idx].start_time <= self.time:
+            driver = self.drivers[self.driver_idx]
+            self.driver_idx += 1
             self.drivers_online[driver.driver_id] = driver  # Main data structure
             self.drivers_available[driver.driver_id] = driver  # Secondary data structure
 
     def add_new_orders(self):
-        while self.orders and self.orders[0].start_time <= self.time:
-            order = self.orders.popleft()
+        while self.order_idx < len(self.orders) and self.orders[self.order_idx].start_time <= self.time:
+            order = self.orders[self.order_idx]
+            self.order_idx += 1
             self.orders_active[order.order_id] = order
 
     def build_candidates(self):
@@ -339,38 +341,46 @@ class Simulator:
         """Idle driver movement."""
         for driver in self.drivers_available.values():
             driver.idle_duration += STEP_SEC
+
+        # Driver who just idly reached their idle destination are now (temporarily) free
+        for driver in self.drivers_available.values():
             # Driver who just idly reached their idle destination are now (temporarily) free
             if driver.state == DriverState.IDLE_MOVING and driver.available_time <= self.time:
                 driver.lat = driver.destination_lat
                 driver.lng = driver.destination_lng
                 driver.state = DriverState.FREE
 
-            # Assign new idle destinations to free driver
-            if driver.state == DriverState.FREE:
-                # Choose idle transition
-                transitions = self.grid.idle_transitions(self.time, self.grid.lookup_grid_id(driver.lat, driver.lng))
-                grid_id = np.random.choice(list(transitions.keys()), p=list(transitions.values()))
+        # Assign new idle destinations to free drivers
+        drivers = [d for d in self.drivers_available.values() if d.state == DriverState.FREE]
+        if drivers:
+            driver_coords = np.array([(d.lat, d.lng) for d in drivers])
+            driver_grid_ids = self.grid.lookup_grid_ids(driver_coords)
+
+            all_transitions = [self.grid.idle_transitions(self.time, grid_id) for grid_id in driver_grid_ids]
+            destination_grid_ids = [np.random.choice(list(transitions.keys()), p=list(transitions.values()))
+                                    for transitions in all_transitions]
+            for driver, grid_id in zip(drivers, destination_grid_ids):
                 lat, lng = self.grid.lookup_coord(grid_id)
-                # Update driver
                 driver.destination_lat = lat
                 driver.destination_lng = lng
-
                 dist = local_projection_distance(driver.lat, driver.lng, driver.destination_lat, driver.destination_lng)
                 driver.available_time = self.time + int(DRIVER_SPEED_SEC_PER_METER * dist)
                 driver.state = DriverState.IDLE_MOVING
 
-            # Advance driver towards their idle destinations
-            if driver.state == DriverState.IDLE_MOVING:
-                if driver.lat == driver.destination_lat and driver.lng == driver.destination_lng:
-                    continue
-                lat, lng = local_projection_intermediate_point(
-                    driver.lat, driver.lng, driver.destination_lat, driver.destination_lng, DRIVER_STEP_DISTANCE)
+        # Advance drivers towards their idle destinations
+        drivers = [d for d in self.drivers_available.values()
+                   if d.state == DriverState.IDLE_MOVING and not
+                   (d.lat == d.destination_lat and d.lng == d.destination_lng)]
+        if drivers:
+            driver_coords = np.array([(d.lat, d.lng, d.destination_lat, d.destination_lng) for d in drivers])
+            lats, lngs = local_projection_intermediate_point(driver_coords[:, 0], driver_coords[:, 1],
+                                                             driver_coords[:, 2], driver_coords[:, 3],
+                                                             DRIVER_STEP_DISTANCE)
+            for driver, lat, lng in zip(drivers, lats, lngs):
                 driver.lat = lat
                 driver.lng = lng
-            else:
-                raise ValueError(f'Idle driver encountered in state {driver.state}')
 
 
 if __name__ == '__main__':
-    sim = Simulator(Agent(), '20161102', 5, test=False)
+    sim = Simulator(Agent(), '20161102', 5, order_limit=None)
     sim.run()
