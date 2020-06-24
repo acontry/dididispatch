@@ -3,6 +3,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum, auto
 from pathlib import Path
+import time
 from typing import List, Optional
 
 import numpy as np
@@ -192,11 +193,14 @@ class Simulator:
         return orders
 
     def run(self):
+        start_time = time.time()
         while self.time < self.sim_start_time:
             self.warmup_step()
         while self.order_idx < len(self.orders):
             self.step()
 
+        end_time = time.time()
+        print(f'Run time: {end_time-start_time:.2f} sec')
         total_orders = self.num_fulfilled + self.num_cancelled + self.num_unfulfilled
         print(f'Score: {self.score:.4f}')
         print(f'Completed orders: {self.num_fulfilled / total_orders:.2f} | '
@@ -228,6 +232,7 @@ class Simulator:
                   f'Drivers online: {len(self.drivers_online)} | '
                   f'Drivers available: {len(self.drivers_available)} | '
                   f'Drivers busy: {len(self.drivers_busy)} | '
+                  f'Orders seen: {self.num_fulfilled + self.num_cancelled + self.num_unfulfilled} | '
                   f'Orders fulfilled: {self.num_fulfilled} | '
                   f'Orders unfulfilled: {self.num_unfulfilled} | '
                   f'Orders cancelled: {self.num_cancelled} | '
