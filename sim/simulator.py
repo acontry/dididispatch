@@ -171,11 +171,20 @@ class Simulator:
         repo_score = np.mean([driver.score / (driver.end_time-driver.start_time)
                               for driver in self.drivers_powermode_offline.values()])
         total_orders = self.num_fulfilled + self.num_cancelled + self.num_unfulfilled
-        print(f'Dispatch score: {self.score:.4f}')
-        print(f'Reposition score: {repo_score:.4f}')
-        print(f'Completed orders: {self.num_fulfilled / total_orders:.2f} | '
-              f'Cancelled orders: {self.num_cancelled / total_orders:.2f} | '
-              f'Unfulfilled orders: {self.num_unfulfilled / total_orders:.2f}')
+
+        metrics = {
+            'dispatch_score': self.score,
+            'reposition_score': repo_score,
+            'orders_completed': self.num_fulfilled / total_orders,
+            'orders_cancelled': self.num_cancelled / total_orders,
+            'orders_unfulfilled': self.num_unfulfilled /total_orders
+        }
+        print(f'Dispatch score: {metrics["score"]:.4f}')
+        print(f'Reposition score: {metrics["reposition_score"]:.4f}')
+        print(f'Completed orders: {metrics["orders_completed"]:.2f} | '
+              f'Cancelled orders: {metrics["orders_cancelled"]:.2f} | '
+              f'Unfulfilled orders: {metrics["orders_unfulfilled"]:.2f}')
+        return metrics
 
     def reset(self):
         """Reset simulation.
