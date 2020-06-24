@@ -19,7 +19,7 @@ DEG_PER_METER_LNG = 1 / METERS_PER_DEG_LNG
 
 def local_projection_distance(lat1, lng1, lat2, lng2):
     """Return distance between two points in meters using a local projection."""
-    return sqrt((METERS_PER_DEG_LAT * (lat1 - lat2)) ** 2 + (METERS_PER_DEG_LNG * (lng1 - lng2)) ** 2)
+    return np.sqrt((METERS_PER_DEG_LAT * (lat1 - lat2)) ** 2 + (METERS_PER_DEG_LNG * (lng1 - lng2)) ** 2)
 
 
 def local_projection_intermediate_point(lat1, lng1, lat2, lng2, distance_meters):
@@ -32,7 +32,7 @@ def local_projection_intermediate_point(lat1, lng1, lat2, lng2, distance_meters)
 
     u = x2 - x1
     v = y2 - y1
-    norm = sqrt(u**2 + v**2)
+    norm = np.sqrt(u**2 + v**2)
     x_int = x1 + u/norm * distance_meters
     y_int = y1 + u/norm * distance_meters
 
