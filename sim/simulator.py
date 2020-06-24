@@ -199,6 +199,22 @@ class Simulator:
               f'Cancelled orders: {self.num_cancelled / total_orders:.2f} | '
               f'Unfulfilled orders: {self.num_unfulfilled / total_orders:.2f}')
 
+    def reset(self):
+        """Reset simulation."""
+        self.driver_idx = 0
+        self.order_idx = 0
+
+        self.sim_start_time = max(self.drivers[0].start_time, self.orders[0].start_time)
+        self.time = self.sim_start_time - self.driver_warmup_time_sec
+        self.steps = 0
+
+        self.num_fulfilled = 0
+        self.num_cancelled = 0
+        self.num_unfulfilled = 0
+        self.score = 0
+        self.score_cancelled = 0
+        self.score_unfulfilled = 0
+
     def step(self):
         self.time += STEP_SEC
         self.steps += 1
