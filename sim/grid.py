@@ -4,7 +4,8 @@ import time
 from pathlib import Path
 from typing import Dict, List, Tuple
 
-from scipy.spatial import KDTree
+import numpy as np
+from scipy.spatial import cKDTree as KDTree
 
 from sim.geo import great_circle_distance, local_projection_distance, METERS_PER_DEG_LAT, METERS_PER_DEG_LNG
 
@@ -53,6 +54,16 @@ class Grid:
         """Get grid id from coordinates."""
         _, i = self.kdtree.query([METERS_PER_DEG_LAT*lat, METERS_PER_DEG_LNG*lng])
         return self.grid_ids[i]
+
+    def lookup_grid_ids(self, coords: np.ndarray) -> List[str]:
+        """Lookup multiple grid_ids.
+
+        Input coords is an array of lat,lng pairs.
+        """
+        coords[:, 0] *= METERS_PER_DEG_LAT
+        coords[:, 1] *= METERS_PER_DEG_LNG
+        _, idx = self.kdtree.query(coords)
+        return [self.grid_ids[i] for i in idx]
 
     def lookup_coord(self, grid_id: str) -> Tuple[float, float]:
         """Return lat/lng coordinates of grid."""
