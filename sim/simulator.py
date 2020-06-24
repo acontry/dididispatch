@@ -9,6 +9,7 @@ from typing import List, Optional
 import numpy as np
 import pandas as pd
 from scipy.spatial import cKDTree as KDTree
+from tqdm import tqdm
 
 from model.agent import Agent
 from sim.geo import (METERS_PER_DEG_LAT, METERS_PER_DEG_LNG, local_projection_distance,
@@ -35,9 +36,7 @@ class DriverState(Enum):
 
 @dataclass
 class Driver:
-    """Driver.
-
-    """
+    """A driver."""
     driver_id: str
     lat: float
     lng: float
@@ -69,6 +68,7 @@ class Driver:
 
 @dataclass
 class Order:
+    """An order."""
     order_id: str
     start_time: int
     end_time: int
@@ -105,16 +105,32 @@ class Simulator:
     def __init__(self,
                  agent: Agent,
                  ds: str,
-                 num_powermode_drivers: int,
+                 num_powermode_drivers: int = 5,
                  driver_warmup_time_sec: int = 60,
-                 order_limit: Optional[int] = None
+                 order_limit: Optional[int] = None,
+                 disable_progress_bar: bool = False
                  ):
+        """Initialize simulator.
+
+        All the data is loaded into memory during init. The simulator state can be reset and re-run so the data load
+        only has to happen once.
+
+        Args:
+            agent: Agent to use which handles dispatches and repositions.
+            ds: String in YYYYMMDD format to choose the day to simulate.
+            num_powermode_drivers: Number of powermode (aka repositionable) drivers.
+            driver_warmup_time_sec: Warmup time occurs before first order. During this period, drivers can go online
+                and offline, and they move according to idle transition rules. This warms up the simulation state.
+            order_limit: Limit simulation to N orders. If none, all orders are used.
+            disable_progress_bar: Disables the tqdm progress bar.
+        """
         self.agent = agent
         self.ds = ds
         self.num_powermode_drivers = num_powermode_drivers
         self.order_limit = order_limit
         self.driver_limit = None
         self.driver_warmup_time_sec = driver_warmup_time_sec
+        self.disable_progress_bar = disable_progress_bar
 
         # Spatial info
         self.grid = Grid()
@@ -145,7 +161,6 @@ class Simulator:
         ##################
         # Simulation state
         self.day_of_week = datetime.strptime(self.ds, '%Y%m%d').weekday()  # Monday = 0, Sunday = 6
-        print(f'Driver time {self.drivers[0].start_time} | Order time {self.orders[0].start_time}')
         self.sim_start_time = max(self.drivers[0].start_time, self.orders[0].start_time)
         self.time = self.sim_start_time - self.driver_warmup_time_sec
         self.steps = 0
@@ -162,8 +177,10 @@ class Simulator:
         start_time = time.time()
         while self.time < self.sim_start_time:
             self._warmup_step()
-        while self.order_idx < len(self.orders):
-            self._step()
+        with tqdm(total=len(self.orders), unit=' orders', unit_scale=True, disable=self.disable_progress_bar) as pbar:
+            self.pbar = pbar
+            while self.order_idx < len(self.orders):
+                self._step()
 
         end_time = time.time()
         print(f'Run time: {end_time-start_time:.2f} sec')
@@ -177,9 +194,9 @@ class Simulator:
             'reposition_score': repo_score,
             'orders_completed': self.num_fulfilled / total_orders,
             'orders_cancelled': self.num_cancelled / total_orders,
-            'orders_unfulfilled': self.num_unfulfilled /total_orders
+            'orders_unfulfilled': self.num_unfulfilled / total_orders
         }
-        print(f'Dispatch score: {metrics["score"]:.4f}')
+        print(f'Dispatch score: {metrics["dispatch_score"]:.4f}')
         print(f'Reposition score: {metrics["reposition_score"]:.4f}')
         print(f'Completed orders: {metrics["orders_completed"]:.2f} | '
               f'Cancelled orders: {metrics["orders_cancelled"]:.2f} | '
@@ -251,16 +268,16 @@ class Simulator:
         self.time += STEP_SEC
         self.steps += 1
 
-        if (self.steps % 100) == 0:
-            print(f'Time: {self.time} | '
-                  f'Drivers online: {len(self.drivers_online)} | '
-                  f'Drivers available: {len(self.drivers_available)} | '
-                  f'Drivers busy: {len(self.drivers_busy)} | '
-                  f'Orders seen: {self.num_fulfilled + self.num_cancelled + self.num_unfulfilled} | '
-                  f'Orders fulfilled: {self.num_fulfilled} | '
-                  f'Orders unfulfilled: {self.num_unfulfilled} | '
-                  f'Orders cancelled: {self.num_cancelled} | '
-                  f'Dispatch score: {self.score:.2f}')
+        if (self.steps % 20) == 0:
+            metrics = {
+                'd_online': len(self.drivers_online),
+                'd_busy': len(self.drivers_busy),
+                'o_fulfilled': self.num_fulfilled,
+                'o_unfulfilled': self.num_unfulfilled,
+                'o_cancelled': self.num_cancelled,
+                'd_score': self.score
+            }
+            self.pbar.set_postfix(**metrics, refresh=False)
 
         # Complete routes, moving finished drivers back to available.
         self._complete_routes()
@@ -329,10 +346,13 @@ class Simulator:
 
     def _add_new_orders(self):
         """Add new orders which occurred."""
+        order_count = 0
         while self.order_idx < len(self.orders) and self.orders[self.order_idx].start_time <= self.time:
             order = self.orders[self.order_idx]
             self.order_idx += 1
+            order_count += 1
             self.orders_active[order.order_id] = order
+        self.pbar.update(order_count)
 
     def _build_candidates(self):
         """Build match candidates.
@@ -468,6 +488,7 @@ class Simulator:
         driver.available_time = self.time + int(DRIVER_SPEED_SEC_PER_METER * dist)
         driver.state = DriverState.IDLE_MOVING
 
+
 if __name__ == '__main__':
-    sim = Simulator(Agent(), '20161102', 5, order_limit=None)
+    sim = Simulator(Agent(), '20161102', order_limit=None)
     sim.run()
