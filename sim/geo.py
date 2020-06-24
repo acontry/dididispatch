@@ -12,12 +12,31 @@ LAT_RAD = np.deg2rad(LAT_DEG)
 # Source:
 # https://en.wikipedia.org/wiki/Geographic_coordinate_system#Latitude_and_longitude
 METERS_PER_DEG_LAT = 111132.92 - 559.82 * cos(2 * LAT_RAD) + 1.175 * cos(4 * LAT_RAD) - 0.0023 * cos(6*LAT_RAD)
+DEG_PER_METER_LAT = 1 / METERS_PER_DEG_LAT
 METERS_PER_DEG_LNG = 111412.84 * cos(LAT_RAD) - 93.5 * cos(3*LAT_RAD) + 0.118 * cos(5*LAT_RAD)
+DEG_PER_METER_LNG = 1 / METERS_PER_DEG_LNG
 
 
 def local_projection_distance(lat1, lng1, lat2, lng2):
-    """Returns distance between two points in meters using a local projection."""
+    """Return distance between two points in meters using a local projection."""
     return sqrt((METERS_PER_DEG_LAT * (lat1 - lat2)) ** 2 + (METERS_PER_DEG_LNG * (lng1 - lng2)) ** 2)
+
+
+def local_projection_intermediate_point(lat1, lng1, lat2, lng2, distance_meters):
+    """Return lat,lng of intermediate point a fixed distance along the line between points 1 and 2.
+
+    Uses local projection coordinate system.
+    """
+    x1, x2 = METERS_PER_DEG_LAT * lat1, METERS_PER_DEG_LAT * lat2
+    y1, y2 = METERS_PER_DEG_LNG * lng1, METERS_PER_DEG_LNG * lng2
+
+    u = x2 - x1
+    v = y2 - y1
+    norm = sqrt(u**2 + v**2)
+    x_int = x1 + u/norm * distance_meters
+    y_int = y1 + u/norm * distance_meters
+
+    return x_int * DEG_PER_METER_LAT, y_int * DEG_PER_METER_LNG
 
 
 def great_circle_distance(lat1, lng1, lat2, lng2):
@@ -29,7 +48,10 @@ def great_circle_distance(lat1, lng1, lat2, lng2):
 
 
 def intermediate_point(lat1, lng1, lat2, lng2, frac):
-    """Return lat,lng of intermediate point a fraction of the way between points 1 and 2."""
+    """Return lat,lng of intermediate point a fraction of the way between points 1 and 2.
+
+    This uses great circle lines.
+    """
     lng1, lat1, lng2, lat2 = map(radians, [lng1, lat1, lng2, lat2])
     d = acos(sin(lat1) * sin(lat2) + cos(lat1) * cos(lat2) * cos(lng1 - lng2))  # Angular distance
     a = sin((1-frac)*d) / sin(d)
