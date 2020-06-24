@@ -122,9 +122,8 @@ class Simulator:
         #########
         # Drivers
         self.driver_idx = 0
-        self.drivers = self.init_drivers(ds, self.driver_limit)  # Pre-online. Natural order: start_time
+        self.drivers = self._init_drivers(ds, self.driver_limit)  # All drivers. Natural order: start_time
         self.drivers_online = dict()  # All online drivers, keyed by driver_id.
-        self.drivers_done = []  # Offline drivers.
 
         # These are secondary data structures to enable fast lookup for driver updates.
         #
@@ -136,7 +135,7 @@ class Simulator:
         ########
         # Orders
         self.order_idx = 0
-        self.orders = self.init_orders(ds, self.order_limit)
+        self.orders = self._init_orders(ds, self.order_limit)
         self.orders_active = dict()
 
         ##################
@@ -154,8 +153,44 @@ class Simulator:
         self.score_cancelled = 0
         self.score_unfulfilled = 0
 
+    def run(self):
+        """Run simulation."""
+        start_time = time.time()
+        while self.time < self.sim_start_time:
+            self._warmup_step()
+        while self.order_idx < len(self.orders):
+            self._step()
+
+        end_time = time.time()
+        print(f'Run time: {end_time-start_time:.2f} sec')
+        total_orders = self.num_fulfilled + self.num_cancelled + self.num_unfulfilled
+        print(f'Score: {self.score:.4f}')
+        print(f'Completed orders: {self.num_fulfilled / total_orders:.2f} | '
+              f'Cancelled orders: {self.num_cancelled / total_orders:.2f} | '
+              f'Unfulfilled orders: {self.num_unfulfilled / total_orders:.2f}')
+
+    def reset(self):
+        """Reset simulation.
+
+        Call this after a run to prepare the simulator state for a new run.
+        """
+        self.driver_idx = 0
+        self.drivers_busy = []
+        self.order_idx = 0
+
+        self.sim_start_time = max(self.drivers[0].start_time, self.orders[0].start_time)
+        self.time = self.sim_start_time - self.driver_warmup_time_sec
+        self.steps = 0
+
+        self.num_fulfilled = 0
+        self.num_cancelled = 0
+        self.num_unfulfilled = 0
+        self.score = 0
+        self.score_cancelled = 0
+        self.score_unfulfilled = 0
+
     @staticmethod
-    def init_drivers(ds: str, driver_limit: Optional[int] = None) -> List[Driver]:
+    def _init_drivers(ds: str, driver_limit: Optional[int] = None) -> List[Driver]:
         print('Initializing drivers')
         df = pd.read_parquet(PROCESSED_DATA_PATH / 'drivers' / f'{ds}.parquet')
         if driver_limit:
@@ -169,7 +204,7 @@ class Simulator:
         return drivers
 
     @staticmethod
-    def init_orders(ds: str, order_limit: Optional[int] = None) -> List[Order]:
+    def _init_orders(ds: str, order_limit: Optional[int] = None) -> List[Order]:
         print('Initializing orders')
         df = pd.read_parquet(PROCESSED_DATA_PATH / 'orders' / f'{ds}.parquet')
         df = df.sort_values(by='start_time', ignore_index=True)
@@ -192,38 +227,7 @@ class Simulator:
         print(f'{len(orders)} orders initialized')
         return orders
 
-    def run(self):
-        start_time = time.time()
-        while self.time < self.sim_start_time:
-            self.warmup_step()
-        while self.order_idx < len(self.orders):
-            self.step()
-
-        end_time = time.time()
-        print(f'Run time: {end_time-start_time:.2f} sec')
-        total_orders = self.num_fulfilled + self.num_cancelled + self.num_unfulfilled
-        print(f'Score: {self.score:.4f}')
-        print(f'Completed orders: {self.num_fulfilled / total_orders:.2f} | '
-              f'Cancelled orders: {self.num_cancelled / total_orders:.2f} | '
-              f'Unfulfilled orders: {self.num_unfulfilled / total_orders:.2f}')
-
-    def reset(self):
-        """Reset simulation."""
-        self.driver_idx = 0
-        self.order_idx = 0
-
-        self.sim_start_time = max(self.drivers[0].start_time, self.orders[0].start_time)
-        self.time = self.sim_start_time - self.driver_warmup_time_sec
-        self.steps = 0
-
-        self.num_fulfilled = 0
-        self.num_cancelled = 0
-        self.num_unfulfilled = 0
-        self.score = 0
-        self.score_cancelled = 0
-        self.score_unfulfilled = 0
-
-    def step(self):
+    def _step(self):
         self.time += STEP_SEC
         self.steps += 1
 
@@ -239,25 +243,25 @@ class Simulator:
                   f'Score: {self.score:.2f}')
 
         # Complete routes, moving finished drivers back to available.
-        self.complete_routes()
+        self._complete_routes()
         # Remove drivers that went offline
-        self.remove_offline_drivers()
+        self._remove_offline_drivers()
         # Add new drivers that went online
-        self.add_online_drivers()
+        self._add_online_drivers()
 
         # Add orders that were made
-        self.add_new_orders()
+        self._add_new_orders()
 
         # Build candidate order-driver pairs
-        candidates = self.build_candidates()
+        candidates = self._build_candidates()
         matched = self.agent.dispatch(candidates)
         # TODO: Driver repositioning
 
-        self.process_new_matches(matched)
-        self.process_unfulfilled_orders()
-        self.move_idle_drivers()
+        self._process_new_matches(matched)
+        self._process_unfulfilled_orders()
+        self._move_idle_drivers()
 
-    def warmup_step(self):
+    def _warmup_step(self):
         """Warmup steps occur before orders happen and only simulate driver online/offline/idle movement."""
         self.time += STEP_SEC
         self.steps += 1
@@ -268,43 +272,49 @@ class Simulator:
                   f'Drivers available: {len(self.drivers_available)} |')
 
         # Remove drivers that went offline
-        self.remove_offline_drivers()
+        self._remove_offline_drivers()
         # Add new drivers that went online
-        self.add_online_drivers()
+        self._add_online_drivers()
 
-        self.move_idle_drivers()
+        self._move_idle_drivers()
 
-    def complete_routes(self):
+    def _complete_routes(self):
+        """Complete finished routes by marking drivers as free."""
         while self.drivers_busy and self.drivers_busy[0][0] <= self.time:
             _, driver_id = heapq.heappop(self.drivers_busy)
             driver = self.drivers_online[driver_id]
             driver.state = DriverState.FREE
             self.drivers_available[driver.driver_id] = driver
 
-    def remove_offline_drivers(self):
-        remove = []
-        for driver_id, driver in self.drivers_available.items():
-            if driver.end_time <= self.time:
-                remove.append(driver_id)  # Track which drivers to remove from available
-                driver = self.drivers_online.pop(driver_id)  # Pop from online dict
-                self.drivers_done.append(driver)  # Append to list
+    def _remove_offline_drivers(self):
+        """Remove drivers who went offline from being active."""
+        # Track which drivers to remove from available
+        remove = [driver_id for driver_id, driver in self.drivers_available.items() if driver.end_time <= self.time]
         for driver_id in remove:
             del self.drivers_available[driver_id]
+            del self.drivers_online[driver_id]
 
-    def add_online_drivers(self):
+    def _add_online_drivers(self):
+        """Add drivers who went online."""
         while self.driver_idx < len(self.drivers) and self.drivers[self.driver_idx].start_time <= self.time:
             driver = self.drivers[self.driver_idx]
             self.driver_idx += 1
             self.drivers_online[driver.driver_id] = driver  # Main data structure
             self.drivers_available[driver.driver_id] = driver  # Secondary data structure
 
-    def add_new_orders(self):
+    def _add_new_orders(self):
+        """Add new orders which occurred."""
         while self.order_idx < len(self.orders) and self.orders[self.order_idx].start_time <= self.time:
             order = self.orders[self.order_idx]
             self.order_idx += 1
             self.orders_active[order.order_id] = order
 
-    def build_candidates(self):
+    def _build_candidates(self):
+        """Build match candidates.
+
+        This is accomplished by putting order pickup coordinates and driver coordinates into KDTrees, then finding all
+        neighbors within 2km of each order.
+        """
         drivers = [(METERS_PER_DEG_LAT * d.lat, METERS_PER_DEG_LNG * d.lng) for d in self.drivers_available.values()]
         driver_ids = [d.driver_id for d in self.drivers_available.values()]
         orders = [(METERS_PER_DEG_LAT * order.pickup_lat, METERS_PER_DEG_LNG * order.pickup_lng)
@@ -322,7 +332,12 @@ class Simulator:
             candidates.extend(order.create_matches(drivers_matched, self.day_of_week))
         return candidates
 
-    def process_new_matches(self, matched):
+    def _process_new_matches(self, matched):
+        """Process new matches created by agent.
+
+        Immediately after match, the cancellation random event is calculated. If a ride is cancelled, the driver remains
+        free for this batch cycle and will do idle movement.
+        """
         for match in matched:
             driver_id = match['driver_id']
             order_id = match['order_id']
@@ -331,8 +346,6 @@ class Simulator:
             order = self.orders_active[order_id]
 
             pickup_distance = local_projection_distance(driver.lat, driver.lng, order.pickup_lat, order.pickup_lng)
-            if pickup_distance > 2000:
-                print('Pickup distance > 2km')
             cancel_prob = np.interp(pickup_distance, CANCEL_PROB_DISTANCES, order.cancel_prob)
             if cancel_prob > np.random.rand():  # Canceled
                 self.num_cancelled += 1
@@ -355,13 +368,13 @@ class Simulator:
                 del self.orders_active[order_id]
                 heapq.heappush(self.drivers_busy, (driver.available_time, driver.driver_id))
 
-    def process_unfulfilled_orders(self):
+    def _process_unfulfilled_orders(self):
         """Remaining orders are unfulfilled, so remove them and track stats."""
         self.num_unfulfilled += len(self.orders_active)
         self.score_unfulfilled += np.sum([order.reward for order in self.orders_active.values()])
         self.orders_active.clear()
 
-    def move_idle_drivers(self):
+    def _move_idle_drivers(self):
         """Idle driver movement."""
         for driver in self.drivers_available.values():
             driver.idle_duration += STEP_SEC
