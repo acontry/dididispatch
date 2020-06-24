@@ -1,5 +1,4 @@
 import heapq
-from collections import deque, OrderedDict
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum, auto
@@ -11,7 +10,8 @@ import pandas as pd
 from scipy.spatial import cKDTree as KDTree
 
 from model.agent import Agent
-from sim.geo import METERS_PER_DEG_LAT, METERS_PER_DEG_LNG, great_circle_distance, local_projection_distance, local_projection_intermediate_point
+from sim.geo import (METERS_PER_DEG_LAT, METERS_PER_DEG_LNG, local_projection_distance,
+                     local_projection_intermediate_point)
 from sim.grid import Grid
 
 STEP_SEC = 2
@@ -78,22 +78,26 @@ class Order:
     reward: float
     cancel_prob: List[float]
 
-    def create_match(self, driver: Driver, day_of_week: int):
-        """Create a potential match with a driver."""
-        distance = local_projection_distance(driver.lat, driver.lng, self.pickup_lat, self.pickup_lng)
-        return {
+    def create_matches(self, drivers: List[Driver], day_of_week: int):
+        """Create potential match with drivers."""
+        if not drivers:
+            return []
+        coords = np.array([(d.lat, d.lng, self.pickup_lat, self.pickup_lng) for d in drivers])
+        distances = local_projection_distance(coords[:, 0], coords[:, 1], coords[:, 2], coords[:, 3])
+        matches = [{
             'order_id': self.order_id,
-            'driver_id': driver.driver_id,
+            'driver_id': d.driver_id,
             'order_driver_distance': distance,
             'order_start_location': [self.pickup_lng, self.pickup_lat],
             'order_finish_location': [self.dropoff_lng, self.dropoff_lat],
-            'driver_location': [driver.lng, driver.lat],
+            'driver_location': [d.lng, d.lat],
             'timestamp': self.start_time,
             'order_finish_timestamp': self.end_time,
             'day_of_week': day_of_week,
             'reward_units': self.reward,
             'pick_up_eta': distance * DRIVER_SPEED_SEC_PER_METER
-        }
+        } for d, distance in zip(drivers, distances)]
+        return matches
 
 
 class Simulator:
@@ -309,9 +313,8 @@ class Simulator:
 
         candidates = []
         for order_matches, order in zip(all_order_matches, self.orders_active.values()):
-            for driver_idx in order_matches:
-                driver = self.drivers_available[driver_ids[driver_idx]]
-                candidates.append(order.create_match(driver, self.day_of_week))
+            drivers_matched = [self.drivers_available[driver_ids[driver_idx]] for driver_idx in order_matches]
+            candidates.extend(order.create_matches(drivers_matched, self.day_of_week))
         return candidates
 
     def process_new_matches(self, matched):
