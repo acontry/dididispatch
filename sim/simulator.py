@@ -19,6 +19,7 @@ STEP_SEC = 2
 MAX_PICKUP_RADIUS_METERS = 2000
 DRIVER_SPEED_SEC_PER_METER = 1.0 / 3
 DRIVER_STEP_DISTANCE = STEP_SEC / DRIVER_SPEED_SEC_PER_METER
+DRIVER_POWERMODE_REPOSITION_TIMEOUT = 60 * 5  # Amount of time powermode driver must be idle before repositioning
 
 CANCEL_PROB_DISTANCES = list(range(200, 2001, 200))
 
@@ -36,7 +37,6 @@ class DriverState(Enum):
 class Driver:
     """Driver.
 
-    Ordered by end time.
     """
     driver_id: str
     lat: float
@@ -105,13 +105,13 @@ class Simulator:
     def __init__(self,
                  agent: Agent,
                  ds: str,
-                 num_repositionable_drivers: int,
+                 num_powermode_drivers: int,
                  driver_warmup_time_sec: int = 60,
                  order_limit: Optional[int] = None
                  ):
         self.agent = agent
         self.ds = ds
-        self.num_repositionable_drivers = num_repositionable_drivers
+        self.num_powermode_drivers = num_powermode_drivers
         self.order_limit = order_limit
         self.driver_limit = None
         self.driver_warmup_time_sec = driver_warmup_time_sec
@@ -129,6 +129,10 @@ class Simulator:
         #
         # Online but not in ride. Keyed by driver_id
         self.drivers_available = dict()
+        # Powermode drivers. Keyed by driver_id
+        self.drivers_powermode = dict()
+        # Powermode offline drivers. Keyed by driver_id
+        self.drivers_powermode_offline = dict()
         # Online and in ride. Natural order: available_time. Min-heap of tuples of (available_time, driver_id)
         self.drivers_busy = []
 
@@ -163,8 +167,12 @@ class Simulator:
 
         end_time = time.time()
         print(f'Run time: {end_time-start_time:.2f} sec')
+
+        repo_score = np.mean([driver.score / (driver.end_time-driver.start_time)
+                              for driver in self.drivers_powermode_offline.values()])
         total_orders = self.num_fulfilled + self.num_cancelled + self.num_unfulfilled
-        print(f'Score: {self.score:.4f}')
+        print(f'Dispatch score: {self.score:.4f}')
+        print(f'Reposition score: {repo_score:.4f}')
         print(f'Completed orders: {self.num_fulfilled / total_orders:.2f} | '
               f'Cancelled orders: {self.num_cancelled / total_orders:.2f} | '
               f'Unfulfilled orders: {self.num_unfulfilled / total_orders:.2f}')
@@ -175,6 +183,9 @@ class Simulator:
         Call this after a run to prepare the simulator state for a new run.
         """
         self.driver_idx = 0
+        self.drivers_available = dict()
+        self.drivers_powermode = dict()
+        self.drivers_powermode_offline = dict()
         self.drivers_busy = []
         self.order_idx = 0
 
@@ -240,7 +251,7 @@ class Simulator:
                   f'Orders fulfilled: {self.num_fulfilled} | '
                   f'Orders unfulfilled: {self.num_unfulfilled} | '
                   f'Orders cancelled: {self.num_cancelled} | '
-                  f'Score: {self.score:.2f}')
+                  f'Dispatch score: {self.score:.2f}')
 
         # Complete routes, moving finished drivers back to available.
         self._complete_routes()
@@ -255,10 +266,10 @@ class Simulator:
         # Build candidate order-driver pairs
         candidates = self._build_candidates()
         matched = self.agent.dispatch(candidates)
-        # TODO: Driver repositioning
 
         self._process_new_matches(matched)
         self._process_unfulfilled_orders()
+        self._position_powermode_drivers()
         self._move_idle_drivers()
 
     def _warmup_step(self):
@@ -291,6 +302,9 @@ class Simulator:
         # Track which drivers to remove from available
         remove = [driver_id for driver_id, driver in self.drivers_available.items() if driver.end_time <= self.time]
         for driver_id in remove:
+            if driver_id in self.drivers_powermode.keys():
+                self.drivers_powermode_offline[driver_id] = self.drivers_available[driver_id]
+                del self.drivers_powermode[driver_id]
             del self.drivers_available[driver_id]
             del self.drivers_online[driver_id]
 
@@ -301,6 +315,8 @@ class Simulator:
             self.driver_idx += 1
             self.drivers_online[driver.driver_id] = driver  # Main data structure
             self.drivers_available[driver.driver_id] = driver  # Secondary data structure
+            if len(self.drivers_powermode) < self.num_powermode_drivers:
+                self.drivers_powermode[driver.driver_id] = driver
 
     def _add_new_orders(self):
         """Add new orders which occurred."""
@@ -374,6 +390,24 @@ class Simulator:
         self.score_unfulfilled += np.sum([order.reward for order in self.orders_active.values()])
         self.orders_active.clear()
 
+    def _position_powermode_drivers(self):
+        """Position idle powermode drivers using agent reposition function."""
+        driver_ids = [driver_id for driver_id, driver in self.drivers_powermode.items()
+                      if driver.state == DriverState.FREE and
+                      driver.idle_duration > DRIVER_POWERMODE_REPOSITION_TIMEOUT]
+        if not driver_ids:
+            return
+        driver_coords = np.array([(self.drivers[driver_id].lat, self.drivers[driver_id].lng)
+                                  for driver_id in driver_ids])
+        grid_ids = self.grid.lookup_grid_ids(driver_coords)
+        repo_observ = {'timestamp': self.time,
+                       'day_of_week': self.day_of_week,
+                       'driver_info': [{'driver_id': driver_id, 'grid_id': grid_id}
+                                       for driver_id, grid_id in zip(driver_ids, grid_ids)]}
+        repositions = self.agent.reposition(repo_observ)
+        for repo in repositions:
+            self._reposition_driver_to_grid_id(repo['driver_id'], repo['destination'])
+
     def _move_idle_drivers(self):
         """Idle driver movement."""
         for driver in self.drivers_available.values():
@@ -397,12 +431,7 @@ class Simulator:
             destination_grid_ids = [np.random.choice(list(transitions.keys()), p=list(transitions.values()))
                                     for transitions in all_transitions]
             for driver, grid_id in zip(drivers, destination_grid_ids):
-                lat, lng = self.grid.lookup_coord(grid_id)
-                driver.destination_lat = lat
-                driver.destination_lng = lng
-                dist = local_projection_distance(driver.lat, driver.lng, driver.destination_lat, driver.destination_lng)
-                driver.available_time = self.time + int(DRIVER_SPEED_SEC_PER_METER * dist)
-                driver.state = DriverState.IDLE_MOVING
+                self._reposition_driver_to_grid_id(driver, grid_id)
 
         # Advance drivers towards their idle destinations
         drivers = [d for d in self.drivers_available.values()
@@ -417,6 +446,18 @@ class Simulator:
                 driver.lat = lat
                 driver.lng = lng
 
+    def _reposition_driver_to_grid_id(self, driver, grid_id):
+        """Reposition a driver to chosen grid_id.
+
+        This sets the driver's state so that the logic to advance drivers towards their destination will pick up
+        this driver.
+        """
+        lat, lng = self.grid.lookup_coord(grid_id)
+        driver.destination_lat = lat
+        driver.destination_lng = lng
+        dist = local_projection_distance(driver.lat, driver.lng, driver.destination_lat, driver.destination_lng)
+        driver.available_time = self.time + int(DRIVER_SPEED_SEC_PER_METER * dist)
+        driver.state = DriverState.IDLE_MOVING
 
 if __name__ == '__main__':
     sim = Simulator(Agent(), '20161102', 5, order_limit=None)
