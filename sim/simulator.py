@@ -8,7 +8,7 @@ from typing import List, Optional
 
 import numpy as np
 import pandas as pd
-from scipy.spatial import KDTree as KDTree
+from scipy.spatial import cKDTree as KDTree
 
 from model.agent import Agent
 from sim.geo import METERS_PER_DEG_LAT, METERS_PER_DEG_LNG, great_circle_distance, local_projection_distance, local_projection_intermediate_point
