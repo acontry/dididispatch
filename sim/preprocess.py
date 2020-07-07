@@ -94,6 +94,7 @@ def process_order_files(interim_data_path, processed_data_path):
         df_cancel = df_cancel[['order_id', 'cancel_prob']]
 
         df = df_order.merge(df_cancel, on='order_id')
+        df = df[df['dropoff_lat'] > 1]  # Filter out bad dropoff data
         df.sort_values(by='start_time', ignore_index=True)
 
         df.to_parquet(output_file_path / f'{order_file.name.split("_")[1]}.parquet', index=False)
